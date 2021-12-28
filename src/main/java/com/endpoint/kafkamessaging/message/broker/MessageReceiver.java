@@ -25,7 +25,23 @@ public class MessageReceiver {
     @Autowired
     MessageHandler messageHandler;
 
-    @KafkaListener(topics = "SEND_MESSAGE")
+    // @KafkaListener(topics = "SEND_MESSAGE")
+    // public void messagesSendToUser(@Payload String message, @Headers MessageHeaders headers) {
+
+    // 	System.out.println("--message--"+message);
+    //     JSONObject jsonObject = new JSONObject(message);
+    //     Long sendTo = Long.parseLong(jsonObject.getString("sendTo"));
+    //     if (WebSocketPool.websockets.get(sendTo) != null) {
+
+    //         String accessToken = jsonObject.getString("accessToken");
+    //          String msg = jsonObject.getString("msg");
+
+    //         messageService.sendMessage(accessToken, sendTo, msg);
+
+    //     }
+    // }
+
+    @KafkaListener(topics = "CHAT_MESSAGE")
     public void messagesSendToUser(@Payload String message, @Headers MessageHeaders headers) {
 
     	System.out.println("--message--"+message);
