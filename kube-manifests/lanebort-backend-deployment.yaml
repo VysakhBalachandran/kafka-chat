@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: lanebort-dev-backend
+    image: lanebort-dev-backend
+  name: lanebort-dev-backend-deploy
+  namespace: dev
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: lanebort-dev-backend
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: lanebort-dev-backend
+        image: lanebort-dev-backend
+        aadpodidbinding: microinsurance-identity-selector
+    spec:
+      containers:
+      - image: laanebort53.azurecr.io/lanebort-dev-backend:latest
+        name: lanebort-dev-backend
+        ports:
+            - containerPort: 8080
+        resources:
+           limits: # max memory
+              cpu: "512m"
+              memory: "1Gi"
+           requests: # minimum amount of memory
+              cpu: "250m"
+              memory: "512Mi"
+      # To schedule pods on based on NodeSelectors
+      tolerations:
+        - key: "app"
+          operator: "Equal"
+          value: "lanebort"
+          effect: "NoSchedule"
+status: {}

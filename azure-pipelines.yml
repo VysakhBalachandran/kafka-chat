@@ -1,0 +1,209 @@
+# Maven
+# Build your Java project and run tests with Apache Maven.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/java
+variables:
+  - group: laanebort-backend-pipeline-grp
+  - group: Lanebort-DevOps-Project-AccessTokens
+  - name: tag
+    value: '$(Build.BuildId)'  
+
+stages:
+ - stage: SonarAndBuild
+   displayName: Codescan, Build & Push Stage
+   jobs:
+   - job: SonarAndBuild
+     displayName: Sonar, Maven, Docker Build & Push
+     pool:
+       vmImage: ubuntu-latest
+     steps:
+     - task: Maven@3
+       displayName: Maven Build
+       inputs:
+         mavenPomFile: 'pom.xml'
+         publishJUnitResults: true
+         testResultsFiles: '**/surefire-reports/TEST-*.xml'
+         codeCoverageToolOption: 'JaCoCo'
+         javaHomeOption: 'JDKVersion'
+         jdkVersionOption: '1.8'
+         mavenVersionOption: 'Default'
+         mavenOptions: '-Xmx3072m'
+         mavenAuthenticateFeed: false
+         effectivePomSkip: false
+         sonarQubeRunAnalysis: false
+     - task: Docker@2
+       displayName: Docker Build and Push
+       inputs:
+         containerRegistry: 'Gjensidge-Lanebort-acr-svc'
+         repository: 'lanebort-dev-backend'
+         command: 'buildAndPush'
+         Dockerfile: '**/Dockerfile'
+         tags: |
+           $(tag)
+           latest
+ - stage: deploy_dev
+   displayName: Deploy to Dev
+   jobs:
+
+    - job: deploy_dev
+      displayName: Deploy to Dev
+      pool:
+        vmImage: ubuntu-latest  
+
+      steps: 
+       - task: KubernetesManifest@0
+         displayName: Create secret for K8s
+         inputs:
+           action: 'createSecret'
+           kubernetesServiceConnection: 'laaenbort-aks-dev-ns-svc'
+           namespace: 'dev'
+           secretType: 'dockerRegistry'
+           secretName: 'laanebort-acr-pull-secret'
+           dockerRegistryEndpoint: 'Gjensidge-Lanebort-acr-svc'
+
+       - task: KubernetesManifest@0
+         displayName: Deploy to K8s dev NS
+         inputs:
+           action: 'deploy'
+           kubernetesServiceConnection: 'laaenbort-aks-dev-ns-svc'
+           namespace: 'dev'
+           manifests: '$(System.DefaultWorkingDirectory)/kube-manifests/lanebort-backend-deployment.yaml'
+           containers: 'laanebort53.azurecr.io/lanebort-dev-backend:$(Build.BuildId)'
+           imagePullSecrets: 'laanebort-acr-pull-secret'
+ 
+ - stage: DAST_owasp
+   displayName: DAST with OWASP ZAP
+   jobs:
+   - job: dast_test
+     displayName: ZAP OWASP Test
+     pool:
+       vmImage: ubuntu-latest 
+     steps: 
+      - task: owaspzap@1
+        inputs:
+          aggressivemode: true
+          threshold: '75'
+          scantype: 'targetedScan'
+          url: 'https://micro-insurance-dev-backend.bfsiaim.com/laanebort'
+          port: '443'
+      - bash: |
+         sudo npm install -g handlebars-cmd
+      
+         cat <<EOF > $(System.DefaultWorkingDirectory)/owaspzap/nunit-template.hbs
+         {{#each site}}
+      
+         <test-run
+             id="2"
+             name="Owasp test"
+             start-time="{{../[@generated]}}"  >
+             <test-suite
+                 id="{{@index}}"
+                 type="Assembly"
+                 name="{{[@name]}}"
+                 result="Failed"
+                 failed="{{alerts.length}}">
+                 <attachments>
+                     <attachment>
+                         <filePath>$(System.DefaultWorkingDirectory)/owaspzap/report.html</filePath>
+                     </attachment>
+                 </attachments>
+             {{#each alerts}}<test-case
+                 id="{{@index}}"
+                 name="{{alert}}"
+                 result="Failed"
+                 fullname="{{alert}}"
+                 time="1">
+                     <failure>
+                         <message>
+                             <![CDATA[{{{desc}}}]]>
+                         </message>
+                         <stack-trace>
+                             <![CDATA[
+         Solution:
+         {{{solution}}}
+      
+         Reference:
+         {{{reference}}}
+      
+         instances:{{#each instances}}
+         * {{uri}}
+             - {{method}}
+             {{#if evidence}}- {{{evidence}}}{{/if}}
+                             {{/each}}]]>
+                         </stack-trace>
+                     </failure>
+             </test-case>
+             {{/each}}
+             </test-suite>
+         </test-run>
+         {{/each}}
+         EOF
+        displayName: 'owasp nunit template'
+        condition: always()
+      - bash: ' handlebars $(System.DefaultWorkingDirectory)/owaspzap/report.json < $(System.DefaultWorkingDirectory)/owaspzap/nunit-template.hbs > $(System.DefaultWorkingDirectory)/owaspzap/test-results.xml'
+        displayName: 'generate nunit type file'
+        condition: always()  
+      - task: PublishTestResults@2
+        displayName: 'Publish Test Results **/TEST-*.xml'
+        inputs:
+          testResultsFormat: NUnit
+          testResultsFiles: '$(System.DefaultWorkingDirectory)/owaspzap/test-results.xml'
+        condition: always()   
+ - stage: stage_image_tag
+   displayName: Update Image Tag
+   jobs:
+    - job: update_image_tag
+      displayName: Update Image Tag
+      pool:
+        vmImage: ubuntu-latest  
+      steps:       
+      - task: PowerShell@2
+        displayName: Update Image TAG 
+        inputs:
+          targetType: 'inline'
+          script: |
+            $base64AuthInfo = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f "","$(AZDO_PERSONAL_ACCESS_TOKEN)")))
+            
+            $url = "$($env:SYSTEM_TEAMFOUNDATIONCOLLECTIONURI)_apis/distributedtask/variablegroups/$(VARIABLE_GROUP_ID)?api-version=6.0-preview.2"
+            Write-Host $url
+            
+            
+            $json = '{"type":"Vsts","name":"$(VARIABLE_GROUP_NAME)","variableGroupProjectReferences":[{"name": "$(VARIABLE_GROUP_NAME)","projectReference":{"name":"$(PROJECT_NAME)"}}],"variables":{"IMAGE_TAG":{"value":"$(Build.BuildId)"},"VARIABLE_GROUP_NAME":{"value":"$(VARIABLE_GROUP_NAME)"},"VARIABLE_GROUP_ID":{"value":"$(VARIABLE_GROUP_ID)"},"PROJECT_NAME":{"value":"$(PROJECT_NAME)"}}}'
+            
+            
+            $pipeline = Invoke-RestMethod -Uri $url -Method Put -Body $json -ContentType "application/json" -Headers @{Authorization=("Basic {0}" -f $base64AuthInfo)}
+            
+            Write-Host "New Variable Value:" $pipeline.variables.testvariable.value       
+ 
+
+ - stage: deploy_test
+   displayName: Deploy to test
+   jobs:
+    - deployment: deploy_test
+      #job: deploy_test
+      displayName: Deploy to test
+      pool:
+        vmImage: ubuntu-latest  
+      environment: test
+      strategy:
+        runOnce:
+          deploy:        
+            steps:  
+            - checkout: self
+              persistCredentials: true        
+            - task: Bash@3
+              inputs:
+                targetType: 'inline'
+                script: |
+                   export IMAGE_TAG="$(IMAGE_TAG)"
+                   echo $IMAGE_TAG
+                   git config --global user.email "laanebort@azuredevops.com"
+                   git config --global user.name "Laanebort"
+                   mkdir -p ~/.ssh
+                   git clone https://$(AZDO_PERSONAL_ACCESS_TOKEN)@dev.azure.com/Lanebort-Gjensidge/Gjensidge-Lanebort/_git/Gjensidge-Lanebort-infra-repo
+                   cd Gjensidge-Lanebort-infra-repo
+                   envsubst < test-env-argocd-helm-template/laanebort-backend-argocd.yaml > test-env-argocd-helm-template/templates/laanebort-backend.yaml
+                   cat test-env-argocd-helm-template/templates/laanebort-backend.yaml
+                   git add .
+                   git commit -m ' DEV image update'
+                   git push origin master
